@@ -18,7 +18,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Recuperer le patch
+      - name: Recuperer le depot
         uses: actions/checkout@v4
 
       - name: Installer Java 25
@@ -27,14 +27,63 @@ jobs:
           distribution: temurin
           java-version: '25'
 
-      - name: Recuperer le code du mod
+      - name: Recuperer les sources de Ziplines
         run: git clone --depth 1 --branch stonecutter https://github.com/evanbones/Ziplines-Rezipped.git ziplines-source
 
-      - name: Appliquer le correctif des mains
+      - name: Corriger les animations sans git apply
         working-directory: ziplines-source
+        shell: bash
         run: |
-          git apply --check ../fix-ziplines-hand-animation.patch
-          git apply ../fix-ziplines-hand-animation.patch
+          python3 - <<'PY'
+          from pathlib import Path
+
+          base = Path('src/main/java/com/evandev/zipline/mixin')
+          renderer = base / 'ItemInHandRendererMixin.java'
+          layer = base / 'ItemInHandLayerMixin.java'
+
+          def replace_once(text, before, after, label):
+              if before in text:
+                  if text.count(before) != 1:
+                      raise RuntimeError(f'{label}: occurrence ambigue')
+                  return text.replace(before, after, 1)
+              if after in text:
+                  print(f'{label}: deja corrige')
+                  return text
+              raise RuntimeError(f'{label}: code source inattendu; arret pour eviter une modification incorrecte')
+
+          a = renderer.read_text(encoding='utf-8')
+          a = replace_once(
+              a,
+              '!itemStack.is(ZiplineTags.ATTACHMENT) || !player.isUsingItem()) {',
+              '!itemStack.is(ZiplineTags.ATTACHMENT) || !player.isUsingItem() || player.getUsedItemHand() != hand) {',
+              'Main 26.2'
+          )
+          a = replace_once(
+              a,
+              '!itemStack.is(ZiplineTags.ATTACHMENT) || !avatarRenderState.isUsingItem) {',
+              '!itemStack.is(ZiplineTags.ATTACHMENT) || !avatarRenderState.isUsingItem || avatarRenderState.useItemHand != hand) {',
+              'Main 26.3'
+          )
+          renderer.write_text(a, encoding='utf-8')
+
+          b = layer.read_text(encoding='utf-8')
+          b = replace_once(
+              b,
+              'import net.minecraft.world.entity.HumanoidArm;',
+              'import net.minecraft.world.InteractionHand;\nimport net.minecraft.world.entity.HumanoidArm;',
+              'Import troisieme personne'
+          )
+          b = replace_once(
+              b,
+              'if (useItem.is(ZiplineTags.ATTACHMENT)) {',
+              'if (useItem.is(ZiplineTags.ATTACHMENT) &&\n'
+              '                arm == (humanoidState.useItemHand == InteractionHand.MAIN_HAND\n'
+              '                        ? humanoidState.mainArm : humanoidState.mainArm.getOpposite())) {',
+              'Bras troisieme personne'
+          )
+          layer.write_text(b, encoding='utf-8')
+          print('Correction des animations appliquee.')
+          PY
 
       - name: Compiler le mod Fabric
         working-directory: ziplines-source
@@ -44,7 +93,7 @@ jobs:
           chmod +x gradlew
           ./gradlew ":${MC_VERSION}-fabric:build" --no-daemon
 
-      - name: Selectionner le JAR installable
+      - name: Selectionner le JAR
         env:
           MC_VERSION: ${{ inputs.minecraft_version }}
         run: |
@@ -52,12 +101,12 @@ jobs:
           libdir="ziplines-source/versions/${MC_VERSION}-fabric/build/libs"
           test -d "$libdir"
           jar=$(find "$libdir" -maxdepth 1 -type f -name '*.jar' ! -name '*sources*' ! -name '*javadoc*' ! -name '*-dev*' -print -quit)
-          test -n "$jar" || { echo 'ERREUR: aucun .jar installable trouve'; exit 1; }
+          test -n "$jar" || { echo 'Aucun .jar installable trouve'; exit 1; }
           mkdir -p resultat
           cp "$jar" "resultat/ziplines-corrige-${MC_VERSION}-fabric.jar"
           echo "JAR retenu : $jar"
 
-      - name: Permettre le telechargement du JAR
+      - name: Publier le JAR compile
         uses: actions/upload-artifact@v4
         with:
           name: Ziplines-corrige-${{ inputs.minecraft_version }}-Fabric
