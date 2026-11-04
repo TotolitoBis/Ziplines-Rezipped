@@ -1,0 +1,115 @@
+name: Ziplines - corriger animation mains et compiler
+
+on:
+  workflow_dispatch:
+    inputs:
+      minecraft_version:
+        description: Version Minecraft (Fabric)
+        type: choice
+        required: true
+        default: '26.3'
+        options:
+          - '26.3'
+          - '26.2'
+
+permissions:
+  contents: read
+
+jobs:
+  compiler:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Installer Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Recuperer les sources officielles
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch stonecutter https://github.com/evanbones/Ziplines-Rezipped.git source
+          git -C source rev-parse HEAD
+
+      - name: Corriger la main animee (sans fichier patch)
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          directory = Path('src/main/java/com/evandev/zipline/mixin')
+
+          def edit(filename, changes):
+              path = directory / filename
+              content = path.read_text(encoding='utf-8')
+              for label, before, after in changes:
+                  count = content.count(before)
+                  if count != 1:
+                      raise SystemExit(
+                          f'ERREUR ({filename}, {label}) : attendu 1 occurrence, obtenu {count}. '
+                          'La source a change; aucun remplacement approximatif.'
+                      )
+                  content = content.replace(before, after, 1)
+                  print(f'OK : {filename} / {label}')
+              path.write_text(content, encoding='utf-8')
+
+          edit('ItemInHandRendererMixin.java', [
+              ('premiere personne 26.2',
+               '!itemStack.is(ZiplineTags.ATTACHMENT) || !player.isUsingItem()) {',
+               '!itemStack.is(ZiplineTags.ATTACHMENT) || !player.isUsingItem() || player.getUsedItemHand() != hand) {'),
+              ('premiere personne 26.3',
+               '!itemStack.is(ZiplineTags.ATTACHMENT) || !avatarRenderState.isUsingItem) {',
+               '!itemStack.is(ZiplineTags.ATTACHMENT) || !avatarRenderState.isUsingItem || avatarRenderState.useItemHand != hand) {'),
+          ])
+
+          edit('ItemInHandLayerMixin.java', [
+              ('import InteractionHand',
+               'import net.minecraft.world.entity.HumanoidArm;',
+               'import net.minecraft.world.InteractionHand;\nimport net.minecraft.world.entity.HumanoidArm;'),
+              ('troisieme personne : verifier le bras utilise',
+               'if (!humanoidState.isUsingItem) {\n            return;\n        }',
+               'if (!humanoidState.isUsingItem) {\n            return;\n        }\n'
+               '        HumanoidArm activeArm = humanoidState.useItemHand == InteractionHand.MAIN_HAND\n'
+               '                ? humanoidState.mainArm : humanoidState.mainArm.getOpposite();\n'
+               '        if (arm != activeArm) {\n            return;\n        }'),
+          ])
+          PY
+          git diff --check
+          git diff --stat
+
+      - name: Compiler Fabric
+        working-directory: source
+        shell: bash
+        env:
+          MC_VERSION: ${{ inputs.minecraft_version }}
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew ":${MC_VERSION}-fabric:build" --no-daemon --stacktrace
+
+      - name: Selectionner le fichier installable
+        shell: bash
+        env:
+          MC_VERSION: ${{ inputs.minecraft_version }}
+        run: |
+          set -euo pipefail
+          output="source/versions/${MC_VERSION}-fabric/build/libs"
+          test -d "$output" || { echo "ERREUR : pas de dossier $output"; exit 1; }
+          echo "JAR trouves :"
+          ls -lh "$output"
+          jar=$(find "$output" -maxdepth 1 -type f -name '*.jar' \
+            ! -name '*sources*' ! -name '*-dev*' ! -name '*javadoc*' | head -n 1)
+          test -n "$jar" || { echo 'ERREUR : aucun JAR de mod installable'; exit 1; }
+          mkdir -p resultat
+          cp "$jar" resultat/
+          echo "Fichier selectionne : $jar"
+
+      - name: Mettre le JAR a disposition
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ziplines-animation-corrigee-${{ inputs.minecraft_version }}-Fabric
+          path: resultat/*.jar
+          if-no-files-found: error
